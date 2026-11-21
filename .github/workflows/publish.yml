@@ -1,0 +1,106 @@
+# Makes an attached infraone release public and commits its formula (CLI-189), when
+# harness-cli's publish workflow pushes a marker branch `publish/infraone-v<version>`.
+# The marker's file PUBLISH names the commit the release must have been built from.
+#
+# Refused unless the draft exists, carries exactly the release's assets, and its
+# notes name that commit (attach.yml writes the line only after the last asset).
+# The formula is committed to main unless the tap already holds a newer one. A
+# public release is never touched again, so running this once more for a version
+# that is already public finishes the formula and the marker's removal.
+name: publish
+
+on:
+  push:
+    branches: ["publish/infraone-v*"]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: infraone-release
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      REF_NAME: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          path: main
+          fetch-depth: 0
+          persist-credentials: true
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          path: branch
+          persist-credentials: true
+
+      - name: Validate the marker
+        id: marker
+        run: node main/.github/scripts/prepare-publish.mjs "$REF_NAME" branch/PUBLISH
+
+      - name: Check the release and make it public
+        id: release
+        env:
+          VERSION: ${{ steps.marker.outputs.version }}
+          SOURCE_SHA: ${{ steps.marker.outputs.sha }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          tag="infraone-v$VERSION"
+
+          gh release view "$tag" --json isDraft,body,assets > "$RUNNER_TEMP/release.json" \
+            || { echo "::error::$tag has no release; nothing was attached."; exit 1; }
+          draft=$(jq -r .isDraft "$RUNNER_TEMP/release.json")
+          jq -r .body "$RUNNER_TEMP/release.json" | grep -qxF "infraone $VERSION. Built from allocator-one/harness-cli@$SOURCE_SHA." \
+            || { echo "::error::The notes of $tag do not name allocator-one/harness-cli@$SOURCE_SHA."; exit 1; }
+
+          mkdir -p "$RUNNER_TEMP/assets"
+          gh release download "$tag" --dir "$RUNNER_TEMP/assets" --clobber
+          node main/.github/scripts/verify-release.mjs "$VERSION" "$RUNNER_TEMP/assets"
+
+          # A formula newer than this release stays; this release then does not become the latest.
+          stale=$(node main/.github/scripts/check-tap.mjs "$VERSION" main/Formula/infraone.rb)
+          echo "$stale"
+          if [ "$stale" = "stale=true" ]; then latest=false; else latest=true; fi
+          if [ "$draft" = "true" ]; then
+            gh release edit "$tag" --draft=false --prerelease=false "--latest=$latest"
+          fi
+          echo "stale=${stale#stale=}" >> "$GITHUB_OUTPUT"
+
+      - name: Commit the formula
+        if: steps.release.outputs.stale == 'false'
+        working-directory: main
+        env:
+          VERSION: ${{ steps.marker.outputs.version }}
+          ASSETS: ${{ runner.temp }}/assets
+        run: |
+          set -euo pipefail
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          mkdir -p Formula
+          rm -f Formula/harness.rb Formula/operator.rb Formula/harness-cli.rb
+          cp "$ASSETS/infraone.rb" Formula/infraone.rb
+          git add -A Formula
+          if git diff --cached --quiet; then
+            echo "The tap already has this formula."
+          else
+            git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+              commit -m "infraone $VERSION"
+            git push origin HEAD:main
+          fi
+
+      - name: Delete the marker branch
+        if: success()
+        working-directory: branch
+        env:
+          PUSHED_SHA: ${{ github.sha }}
+        # Only if the branch is still at the commit this run handled: a newer push to it has its own run.
+        run: git push --force-with-lease="refs/heads/$REF_NAME:$PUSHED_SHA" origin ":refs/heads/$REF_NAME"

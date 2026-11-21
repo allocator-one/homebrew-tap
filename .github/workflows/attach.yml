@@ -1,0 +1,92 @@
+# Attaches an infraone release payload, pushed by harness-cli's release workflow to
+# a branch `incoming/infraone-v<version>`, to a DRAFT release `infraone-v<version>`
+# (CLI-189). A deploy key can push refs but cannot call the releases API, so this
+# workflow does, with this repository's own token.
+#
+# The repository is public, so everything on the branch is untrusted: the ref name,
+# the file names, SOURCE and the checksums are matched against strict patterns in
+# .github/scripts before any step uses them, and steps only receive them through
+# environment variables. Nothing here makes a release public: publish.yml does.
+name: attach
+
+on:
+  push:
+    branches: ["incoming/infraone-v*"]
+
+permissions:
+  contents: write
+
+# One group with publish.yml, so a release is never attached and made public at once.
+concurrency:
+  group: infraone-release
+  cancel-in-progress: false
+
+jobs:
+  attach:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      REF_NAME: ${{ github.ref_name }}
+    steps:
+      # The scripts come from main, never from the pushed branch.
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          path: main
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          path: branch
+          persist-credentials: true
+
+      - name: Validate the payload and restore the assets
+        id: payload
+        run: node main/.github/scripts/prepare-attach.mjs "$REF_NAME" branch/payload "$RUNNER_TEMP/assets/files"
+        env:
+          GITHUB_REPOSITORY: ${{ github.repository }}
+
+      - name: Attach to the draft release
+        env:
+          VERSION: ${{ steps.payload.outputs.version }}
+          SOURCE_SHA: ${{ steps.payload.outputs.sha }}
+          ASSETS: ${{ runner.temp }}/assets/files
+        run: |
+          set -euo pipefail
+          # Both values were matched against strict patterns by the previous step.
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          tag="infraone-v$VERSION"
+
+          if state=$(gh release view "$tag" --json isDraft --jq .isDraft 2>/dev/null); then
+            if [ "$state" != "true" ]; then
+              echo "::notice::$tag is already public; it is left alone."
+              exit 0
+            fi
+            gh release edit "$tag" --draft --notes "infraone $VERSION: the assets are still being attached."
+          else
+            gh release create "$tag" --draft --target main --title "infraone $VERSION" \
+              --notes "infraone $VERSION: the assets are still being attached."
+          fi
+
+          # A draft that carries a leftover has more than the release's assets.
+          while IFS= read -r name; do
+            if [ ! -e "$ASSETS/$name" ]; then gh release delete-asset "$tag" "$name" --yes; fi
+          done < <(gh release view "$tag" --json assets --jq '.assets[].name')
+          gh release upload "$tag" "$ASSETS"/* --clobber
+
+          # Only after every asset is attached do the notes name the commit that built them.
+          attached=$(gh release view "$tag" --json assets --jq '.assets | map(.name) | sort | join(" ")')
+          expected=$(find "$ASSETS" -mindepth 1 -maxdepth 1 -printf '%f\n' | sort | tr '\n' ' ' | sed 's/ $//')
+          [ "$attached" = "$expected" ]
+          gh release edit "$tag" --notes "infraone $VERSION. Built from allocator-one/harness-cli@$SOURCE_SHA."
+
+      - name: Delete the incoming branch
+        if: success()
+        working-directory: branch
+        env:
+          PUSHED_SHA: ${{ github.sha }}
+        # Only if the branch is still at the commit this run handled: a newer push to it has its own run.
+        run: git push --force-with-lease="refs/heads/$REF_NAME:$PUSHED_SHA" origin ":refs/heads/$REF_NAME"
