@@ -1,10 +1,10 @@
 # Proves that a published infraone release installs and runs on clean machines
 # (CLI-189): brew on macOS, and the install script on Linux. It runs by hand with
 # the version to expect, and by itself after publish.yml succeeds (then the version
-# is the latest release's).
+# is the one the finished publish run was for).
 #
 # No secrets and read-only permissions. The only values from the event are the
-# dispatch input and the release tag; each is matched against a strict pattern in
+# dispatch input and the triggering run's branch name; each is matched against a strict pattern in
 # the first job and reaches later steps only through an environment variable.
 name: verify-install
 
@@ -32,8 +32,7 @@ jobs:
     env:
       EVENT_NAME: ${{ github.event_name }}
       INPUT_VERSION: ${{ inputs.version }}
-      GH_TOKEN: ${{ github.token }}
-      GH_REPO: ${{ github.repository }}
+      RUN_BRANCH: ${{ github.event.workflow_run.head_branch }}
     steps:
       - name: The version to expect
         id: version
@@ -42,8 +41,8 @@ jobs:
           if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
             version="$INPUT_VERSION"
           else
-            tag="$(gh release view --json tagName --jq .tagName)"
-            [[ "$tag" =~ ^infraone-v([0-9]+\.[0-9]+\.[0-9]+)$ ]] || { echo "::error::the latest release is not an infraone release: $tag"; exit 1; }
+            # The publish run that finished was started by the marker branch publish/infraone-v<version>.
+            [[ "$RUN_BRANCH" =~ ^publish/infraone-v([0-9]+\.[0-9]+\.[0-9]+)$ ]] || { echo "::error::the publish run was not for a release marker: $RUN_BRANCH"; exit 1; }
             version="${BASH_REMATCH[1]}"
           fi
           [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::not a release version: $version"; exit 1; }
