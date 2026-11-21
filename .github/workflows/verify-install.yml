@@ -1,0 +1,95 @@
+# Proves that a published infraone release installs and runs on clean machines
+# (CLI-189): brew on macOS, and the install script on Linux. It runs by hand with
+# the version to expect, and by itself after publish.yml succeeds (then the version
+# is the latest release's).
+#
+# No secrets and read-only permissions. The only values from the event are the
+# dispatch input and the release tag; each is matched against a strict pattern in
+# the first job and reaches later steps only through an environment variable.
+name: verify-install
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "The infraone version both installs must report, such as 1.34.7"
+        required: true
+        type: string
+  workflow_run:
+    workflows: ["publish"]
+    types: [completed]
+
+permissions:
+  contents: read
+
+jobs:
+  version:
+    # After publish.yml only when it succeeded; a dispatch always runs.
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    env:
+      EVENT_NAME: ${{ github.event_name }}
+      INPUT_VERSION: ${{ inputs.version }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: The version to expect
+        id: version
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            version="$INPUT_VERSION"
+          else
+            tag="$(gh release view --json tagName --jq .tagName)"
+            [[ "$tag" =~ ^infraone-v([0-9]+\.[0-9]+\.[0-9]+)$ ]] || { echo "::error::the latest release is not an infraone release: $tag"; exit 1; }
+            version="${BASH_REMATCH[1]}"
+          fi
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::not a release version: $version"; exit 1; }
+          echo "expecting infraone $version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  brew-macos:
+    needs: version
+    runs-on: macos-latest
+    timeout-minutes: 20
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - name: brew install allocator-one/tap/infraone
+        run: |
+          set -euo pipefail
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          brew install allocator-one/tap/infraone
+      - name: infraone rcl --version reports the release
+        run: |
+          set -euo pipefail
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          bin="$(brew --prefix)/bin"
+          uname -sm
+          out="$("$bin/infraone" rcl --version)"
+          echo "$out"
+          case "$out" in "infraone $VERSION (Review Council fork of rcl "*) ;; *) echo "::error::expected infraone $VERSION"; exit 1 ;; esac
+          out="$("$bin/harness" --version)"
+          echo "$out"
+          case "$out" in "infraone harness $VERSION "*) ;; *) echo "::error::harness reports another version"; exit 1 ;; esac
+
+  install-script-linux:
+    needs: version
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      REPO: ${{ github.repository }}
+    steps:
+      - name: The install script from releases/latest/download into a temporary prefix
+        run: |
+          set -euo pipefail
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          prefix="$(mktemp -d)"
+          curl -fsSL "https://github.com/$REPO/releases/latest/download/install.sh" | INFRAONE_INSTALL_DIR="$prefix/bin" sh
+          uname -sm
+          out="$("$prefix/bin/infraone" rcl --version)"
+          echo "$out"
+          case "$out" in "infraone $VERSION (Review Council fork of rcl "*) ;; *) echo "::error::expected infraone $VERSION"; exit 1 ;; esac

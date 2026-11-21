@@ -53,3 +53,8 @@ harness-cli's `packaging/homebrew`; change both together.
   branch again (re-running the job) starts it afresh.
 - Deleting a branch after handling it is conditional on the branch still being at
   the commit that run handled.
+
+`verify-install.yml` checks a published release on clean machines: `brew install
+allocator-one/tap/infraone` on macOS and the install script on Linux, each asserting
+`infraone rcl --version`. It runs after `publish.yml` succeeds and by hand with a
+version (Actions → verify-install → Run workflow).
