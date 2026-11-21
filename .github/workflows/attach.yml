@@ -86,4 +86,7 @@ jobs:
       - name: Delete the incoming branch
         if: success()
         working-directory: branch
-        run: git push origin --delete "$REF_NAME"
+        env:
+          PUSHED_SHA: ${{ github.sha }}
+        # Only if the branch is still at the commit this run handled: a newer push to it has its own run.
+        run: git push --force-with-lease="refs/heads/$REF_NAME:$PUSHED_SHA" origin ":refs/heads/$REF_NAME"

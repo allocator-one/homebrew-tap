@@ -1,4 +1,5 @@
 // Renders the Homebrew formula for `infraone` (IO-18385, I6) from a release's
+// The tap carries a copy of this file in .github/scripts (CLI-189), which re-renders the formula before it is committed.
 // SHA256SUMS: one prebuilt binary per platform, downloaded from the public
 // releases repository, so `brew install` needs neither Node nor npm.
 //

@@ -1,4 +1,5 @@
 // Whether the tap already has a newer infraone formula than the release being
+// The tap carries a copy of this file in .github/scripts (CLI-189): its publish workflow runs it. Change both together.
 // published (CLI-165):
 //
 //   node packaging/homebrew/check-tap.mjs <version> <path to the tap's Formula/infraone.rb>

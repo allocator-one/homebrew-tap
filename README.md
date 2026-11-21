@@ -40,3 +40,16 @@ Everything on those branches is untrusted input: `.github/scripts` matches ref
 names, file names, versions and commits against strict patterns first.
 `render-formula.mjs`, `check-tap.mjs` and `version-newer.mjs` are copies from
 harness-cli's `packaging/homebrew`; change both together.
+
+### Known limits
+
+- A push-triggered workflow runs the definition on the pushed commit, so whoever
+  holds the deploy key (it can push any ref) can push a branch with its own copy
+  of `attach.yml` or `publish.yml`. The checks above protect against mistakes and
+  hostile payload files, not against the key's holder.
+- The two workflows share one concurrency group. GitHub keeps one running and
+  one pending run per group, so a third push cancels the pending one. The cancelled
+  run's branch stays; harness-cli's job waiting on that run fails, and pushing the
+  branch again (re-running the job) starts it afresh.
+- Deleting a branch after handling it is conditional on the branch still being at
+  the commit that run handled.

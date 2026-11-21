@@ -7,8 +7,8 @@
 // the size GitHub takes per file, as infraone-<os>-<arch>.gz.part00, .part01, …
 // Nothing else is accepted. The restored binaries are checked against SHA256SUMS,
 // and the formula and install.sh against what the version and this repository render.
-import { execFileSync } from "node:child_process";
-import { copyFileSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { copyFileSync, mkdirSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { TARGETS, MAX_BINARY_BYTES, checkAssetDirectory, fail, output, parseSource, regularFile, versionOfRef } from "./common.mjs";
 
@@ -35,8 +35,6 @@ if (source.version !== refVersion) fail(`SOURCE names version ${source.version},
 mkdirSync(out, { recursive: true });
 for (const name of ["SHA256SUMS", "install.sh", "infraone.rb"]) copyFileSync(join(payload, name), join(out, name));
 
-const scratch = join(out, "..", "scratch");
-mkdirSync(scratch, { recursive: true });
 for (const target of TARGETS) {
   const whole = `infraone-${target}.gz`;
   const parts = names.filter((name) => name.startsWith(`${whole}.part`));
@@ -47,11 +45,15 @@ for (const target of TARGETS) {
       if (name !== `${whole}.part${String(index).padStart(2, "0")}`) fail(`the parts of infraone-${target} are not numbered 00, 01, … without a gap`);
     });
   }
-  const compressed = join(scratch, `${target}.gz`);
-  writeFileSync(compressed, Buffer.concat((hasWhole ? [whole] : parts).map((name) => readFileSync(join(payload, name)))));
-  // head -c bounds what a hostile archive can write; reaching the bound is a refusal.
+  const pieces = (hasWhole ? [whole] : parts).map((name) => join(payload, name));
+  // The compressed bytes are bounded before anything reads them, and are never held in memory.
+  const compressedBytes = pieces.reduce((total, path) => total + statSync(path).size, 0);
+  if (compressedBytes > MAX_BINARY_BYTES) fail(`infraone-${target} is larger than ${MAX_BINARY_BYTES} bytes compressed`);
+  // gzip must succeed; only a stop caused by the size bound (head closing the pipe, SIGPIPE) is read as "too large".
   const binary = join(out, `infraone-${target}`);
-  execFileSync("sh", ["-c", 'gzip -dc < "$1" | head -c "$2" > "$3"; exit 0', "sh", compressed, String(MAX_BINARY_BYTES), binary], { stdio: ["ignore", "inherit", "inherit"] });
+  const script = 'set +e; cat "${@:3}" | gzip -dc | head -c "$2" > "$1"; status=${PIPESTATUS[1]}; if [ "$status" = 0 ] || [ "$status" = 141 ]; then exit 0; fi; exit "$status"';
+  const result = spawnSync("bash", ["-c", script, "bash", binary, String(MAX_BINARY_BYTES), ...pieces], { stdio: ["ignore", "inherit", "inherit"] });
+  if (result.status !== 0) fail(`infraone-${target} is not a valid gzip stream`);
   if (statSync(binary).size >= MAX_BINARY_BYTES) fail(`infraone-${target} is larger than ${MAX_BINARY_BYTES} bytes uncompressed`);
 }
 
